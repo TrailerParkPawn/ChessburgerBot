@@ -52,7 +52,7 @@ client.connect();
 client.on('connected', (addr, port) => {
   console.log(`Bot connected to ${addr}:${port}`);
   joinedChannels.forEach(channel => {
-    client.say(`#${channel}`, "ChessburgerBot is online! Type !hello or !commands");
+    client.say(`#${channel}`, "ChessburgerBot is online! Type !commands for more info.");
   });
 });
 
@@ -154,6 +154,13 @@ const commands = {
     saveBanned();
     await client.say(ch, `${userToBan} has been banned.`);
   },
+commands: async (channel, tags, args) => {
+  const msg = "Type !join on bot's channel to invite it to your chat. " +
+              "Type !removeburger in your chat to remove bot from your channel. " +
+              "Use commands !daily !weekly !monthly !yearly for your recent game statistics and elo gains. " +
+              "Type !recent to get your last game's PGN.";
+  await client.say(channel, msg);
+},
 
   unban: async (ch, tags, args) => {
     if (tags.username.toLowerCase() !== process.env.TWITCH_USERNAME.toLowerCase()) return;
