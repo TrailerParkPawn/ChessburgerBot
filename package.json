@@ -1,0 +1,24 @@
+{
+  "name": "chesschatbot",
+  "version": "1.0.0",
+  "description": "A Twitch bot that fetches Chess.com stats",
+  "main": "bot.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node bot.js",
+    "stop": "taskkill /F /IM node.exe"
+  },
+  "keywords": [
+    "twitch",
+    "chess",
+    "bot"
+  ],
+  "author": "TrailerParkPawn(rrogacz92@gmail.com",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^17.2.2",
+    "node-fetch": "^2.7.0",
+    "tmi": "^0.2.2",
+    "tmi.js": "^1.8.5"
+  }
+}
