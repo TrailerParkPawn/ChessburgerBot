@@ -413,3 +413,17 @@ async function getLastGame(username) {
         return null;
     }
 }
+
+// ---- Render keep-alive HTTP server ----
+const express = require("express");
+const app = express();
+
+app.get("/", (req, res) => {
+  res.send("ChessburgerBot is running!");
+});
+
+// Render will set process.env.PORT automatically
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Keep-alive server running on port ${PORT}`);
+});
