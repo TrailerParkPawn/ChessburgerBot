@@ -5,22 +5,35 @@
  * See LICENSE file for details
  */
 
-// Install dependencies if not already:
-// npm install node-fetch
 require('dotenv').config();
-
 const fetch = require("node-fetch");
 const tmi = require("tmi.js");
 const fs = require("fs");
 
-// ---- Load joined channels from file ----
+// ---- Load joined channels ----
 let joinedChannels = [];
 const channelsFile = "channels.json";
-
 if (fs.existsSync(channelsFile)) {
   joinedChannels = JSON.parse(fs.readFileSync(channelsFile));
 } else {
   fs.writeFileSync(channelsFile, JSON.stringify([]));
+}
+
+// ---- Load banned users ----
+let bannedUsers = [];
+const bannedFile = "banned.json";
+if (fs.existsSync(bannedFile)) {
+  bannedUsers = JSON.parse(fs.readFileSync(bannedFile));
+} else {
+  fs.writeFileSync(bannedFile, JSON.stringify([]));
+}
+
+function saveChannels() {
+  fs.writeFileSync(channelsFile, JSON.stringify(joinedChannels, null, 2));
+}
+
+function saveBanned() {
+  fs.writeFileSync(bannedFile, JSON.stringify(bannedUsers, null, 2));
 }
 
 // ---- Bot Config ----
@@ -31,7 +44,7 @@ const client = new tmi.Client({
     username: process.env.TWITCH_USERNAME,
     password: process.env.OAUTH_TOKEN
   },
-  channels: joinedChannels.length > 0 ? joinedChannels : ["chessburgerbot"]
+  channels: joinedChannels.length > 0 ? joinedChannels.map(c => `#${c}`) : ["#chessburgerbot"]
 });
 
 client.connect();
@@ -39,15 +52,178 @@ client.connect();
 client.on('connected', (addr, port) => {
   console.log(`Bot connected to ${addr}:${port}`);
   joinedChannels.forEach(channel => {
-    client.say(channel, "ChessburgerBot is online! Type !hello or !commands");
+    client.say(`#${channel}`, "ChessburgerBot is online! Type !hello or !commands");
   });
 });
 
-function saveChannels() {
-  fs.writeFileSync(channelsFile, JSON.stringify(joinedChannels, null, 2));
+// -------------------- Stats & Recent Handlers --------------------
+async function handleStats(channel, tags, args, periodType) {
+  const username = args[0]?.toLowerCase();
+  if (!username) {
+    await client.say(channel, `Please provide a username. Example: !${periodType} hikaru`);
+    return;
+  }
+
+  const now = new Date();
+  let periodStart, periodEnd;
+
+  if (periodType === 'daily') {
+    periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+    periodEnd   = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59));
+  } else if (periodType === 'weekly') {
+    const day = now.getUTCDay();
+    const diff = day === 0 ? 6 : day - 1;
+    const start = new Date(now);
+    start.setUTCDate(now.getUTCDate() - diff);
+    periodStart = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate(), 0, 0, 0));
+    periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59));
+  } else if (periodType === 'monthly') {
+    periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0));
+    periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59));
+  } else if (periodType === 'yearly') {
+    periodStart = new Date(Date.UTC(now.getUTCFullYear(), 0, 1, 0, 0, 0));
+    periodEnd = new Date(Date.UTC(now.getUTCFullYear(), 11, 31, 23, 59, 59));
+  }
+
+  try {
+    const { stats, startRatings, endRatings, gamesInPeriod } = await getStats(username, periodStart, periodEnd, periodType);
+
+    const totalGames = gamesInPeriod.length;
+    const totalGamesStr = totalGames === 1 ? '1 game' : `${totalGames} games`;
+
+    const rapidStr = `${stats.rapid.count} ${stats.rapid.count === 1 ? 'Rapid game' : 'Rapid games'}`;
+    const blitzStr = `${stats.blitz.count} ${stats.blitz.count === 1 ? 'Blitz game' : 'Blitz games'}`;
+    const bulletStr = `${stats.bullet.count} ${stats.bullet.count === 1 ? 'Bullet game' : 'Bullet games'}`;
+
+    const rapidRating = stats.rapid.count > 0 && startRatings.rapid != null && endRatings.rapid != null ? 
+        `, rating: ${endRatings.rapid - startRatings.rapid >= 0 ? '+' : ''}${endRatings.rapid - startRatings.rapid} (${startRatings.rapid} -> ${endRatings.rapid})` : '';
+
+    const blitzRating = stats.blitz.count > 0 && startRatings.blitz != null && endRatings.blitz != null ? 
+        `, rating: ${endRatings.blitz - startRatings.blitz >= 0 ? '+' : ''}${endRatings.blitz - startRatings.blitz} (${startRatings.blitz} -> ${endRatings.blitz})` : '';
+
+    const bulletRating = stats.bullet.count > 0 && startRatings.bullet != null && endRatings.bullet != null ? 
+        `, rating: ${endRatings.bullet - startRatings.bullet >= 0 ? '+' : ''}${endRatings.bullet - startRatings.bullet} (${startRatings.bullet} -> ${endRatings.bullet})` : '';
+
+    const periodName = periodType === 'yearly' ? 'this year' : periodType === 'monthly' ? 'this month' : periodType === 'weekly' ? 'this week' : 'today';
+
+    const msg = `${username} has played ${totalGamesStr} ${periodName}. ${rapidStr}${rapidRating}, ${blitzStr}${blitzRating}, ${bulletStr}${bulletRating}`;
+    await client.say(channel, msg);
+
+  } catch (err) {
+    console.error(`Error fetching stats for ${username}:`, err);
+    await client.say(channel, `Error fetching stats for ${username}`);
+  }
 }
 
-// -------------------- GET STATS --------------------
+async function handleRecent(channel, tags, args) {
+  const username = args[0]?.toLowerCase();
+  if (!username) {
+    await client.say(channel, `Please provide a username. Example: !recent hikaru`);
+    return;
+  }
+
+  try {
+    const lastGame = await getLastGame(username);
+    if (!lastGame) {
+      await client.say(channel, `No recent games found for ${username}.`);
+      return;
+    }
+
+    const msg = `${username} has played as ${lastGame.color} and ${lastGame.result} most recent game:\n${lastGame.pgn}`;
+    await client.say(channel, msg);
+
+  } catch (err) {
+    console.error(`Error fetching last game for ${username}:`, err);
+    await client.say(channel, `Error fetching last game for ${username}.`);
+  }
+}
+
+// -------------------- Command Handler --------------------
+const commands = {
+  daily: async (ch, tags, args) => await handleStats(ch, tags, args, 'daily'),
+  weekly: async (ch, tags, args) => await handleStats(ch, tags, args, 'weekly'),
+  monthly: async (ch, tags, args) => await handleStats(ch, tags, args, 'monthly'),
+  yearly: async (ch, tags, args) => await handleStats(ch, tags, args, 'yearly'),
+  recent: async (ch, tags, args) => await handleRecent(ch, tags, args),
+
+  ban: async (ch, tags, args) => {
+    if (tags.username.toLowerCase() !== process.env.TWITCH_USERNAME.toLowerCase()) return;
+    const userToBan = args[0]?.toLowerCase();
+    if (!userToBan || bannedUsers.includes(userToBan)) return;
+    bannedUsers.push(userToBan);
+    saveBanned();
+    await client.say(ch, `${userToBan} has been banned.`);
+  },
+
+  unban: async (ch, tags, args) => {
+    if (tags.username.toLowerCase() !== process.env.TWITCH_USERNAME.toLowerCase()) return;
+    const userToUnban = args[0]?.toLowerCase();
+    const index = bannedUsers.indexOf(userToUnban);
+    if (index !== -1) {
+      bannedUsers.splice(index, 1);
+      saveBanned();
+      await client.say(ch, `${userToUnban} has been unbanned.`);
+    }
+  },
+
+join: async (channel, tags, args) => {
+  // If no channel argument is given, default to the sender's username
+  const targetChannel = args[0]?.toLowerCase() || tags.username.toLowerCase();
+
+  // Only the channel owner can make the bot join their channel
+  if (tags.username.toLowerCase() !== targetChannel) {
+    await client.say(channel, `You can only make the bot join your own channel.`);
+    return;
+  }
+
+  // Check if already joined (case-insensitive)
+  if (!joinedChannels.some(c => c.toLowerCase() === targetChannel)) {
+    joinedChannels.push(targetChannel);       // store clean lowercase
+    saveChannels();
+    await client.join(`#${targetChannel}`);  // tmi.js requires #
+    await client.say(channel, `Bot has joined ${targetChannel}'s channel.`);
+  } else {
+    await client.say(channel, `Bot is already in ${targetChannel}'s channel.`);
+  }
+},
+
+  removeburger: async (channel, tags) => {
+    const chOwner = channel.replace('#', '').toLowerCase();
+    if (tags.username.toLowerCase() !== chOwner) return;
+
+    const idx = joinedChannels.findIndex(c => c === chOwner);
+    if (idx !== -1) {
+      const removed = joinedChannels.splice(idx, 1)[0];
+      saveChannels();
+      await client.say(channel, `Bot is leaving the channel. Goodbye!`);
+      await client.part(`#${removed}`);
+    } else {
+      await client.say(channel, `Bot is not in this channel.`);
+    }
+  }
+};
+
+// -------------------- Message Listener --------------------
+client.on('message', async (channel, tags, message, self) => {
+  if (self) return;
+  if (bannedUsers.includes(tags.username.toLowerCase())) return;
+
+  const parts = message.trim().split(/\s+/);
+  const commandName = parts[0].replace(/^!/, '').toLowerCase();
+  const args = parts.slice(1);
+
+  const command = commands[commandName];
+  if (command) {
+    try {
+      await command(channel, tags, args);
+    } catch (err) {
+      console.error(`Error executing command !${commandName}:`, err);
+      await client.say(channel, `Error executing !${commandName}`);
+    }
+  }
+});
+
+// -------------------- Stats Fetching & Last Game --------------------
 async function getStats(username, periodStart, periodEnd, periodType) {
     console.log(`=== Calculating stats for ${username} (${periodType}) ===`);
     console.log(`Period start: ${periodStart}, end: ${periodEnd}`);
@@ -230,88 +406,3 @@ async function getLastGame(username) {
         return null;
     }
 }
-
-// ---------------------- MSG HANDLERS ----------------------
-client.on('message', async (channel, tags, message, self) => {
-    if (self) return;
-
-    const parts = message.trim().split(/\s+/);
-    const command = parts[0].toLowerCase();
-    const username = parts[1];
-    if (!username) return;
-
-    const now = new Date();
-    let periodStart, periodEnd, periodType;
-
-    if (command === '!daily') {
-        periodType = 'daily';
-        periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
-        periodEnd   = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59));
-    } else if (command === '!weekly') {
-        periodType = 'weekly';
-        const day = now.getUTCDay();
-        const diff = day === 0 ? 6 : day - 1;
-        const start = new Date(now);
-        start.setUTCDate(now.getUTCDate() - diff);
-        periodStart = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate(), 0, 0, 0));
-        periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59));
-    } else if (command === '!monthly') {
-        periodType = 'monthly';
-        periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0));
-        periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59));
-    } else if (command === '!yearly') {
-        periodType = 'yearly';
-        periodStart = new Date(Date.UTC(now.getUTCFullYear(), 0, 1, 0, 0, 0));
-        periodEnd = new Date(Date.UTC(now.getUTCFullYear(), 11, 31, 23, 59, 59));
-    }
-
-    if (['!daily', '!weekly', '!monthly', '!yearly'].includes(command)) {
-        console.log(`=== Calculating stats for ${username} (${periodType}) ===`);
-        console.log(`Period start: ${periodStart.toUTCString()}, end: ${periodEnd.toUTCString()}`);
-
-        try {
-            const { stats, startRatings, endRatings, gamesInPeriod } = await getStats(username, periodStart, periodEnd, periodType);
-
-            const totalGames = gamesInPeriod.length;
-            const totalGamesStr = totalGames === 1 ? '1 game' : `${totalGames} games`;
-
-            const rapidStr = `${stats.rapid.count} ${stats.rapid.count === 1 ? 'Rapid game' : 'Rapid games'}`;
-            const blitzStr = `${stats.blitz.count} ${stats.blitz.count === 1 ? 'Blitz game' : 'Blitz games'}`;
-            const bulletStr = `${stats.bullet.count} ${stats.bullet.count === 1 ? 'Bullet game' : 'Bullet games'}`;
-
-            const rapidRating = stats.rapid.count > 0 && startRatings.rapid != null && endRatings.rapid != null ? 
-                `, rating: ${endRatings.rapid - startRatings.rapid >= 0 ? '+' : ''}${endRatings.rapid - startRatings.rapid} (${startRatings.rapid} -> ${endRatings.rapid})` : '';
-
-            const blitzRating = stats.blitz.count > 0 && startRatings.blitz != null && endRatings.blitz != null ? 
-                `, rating: ${endRatings.blitz - startRatings.blitz >= 0 ? '+' : ''}${endRatings.blitz - startRatings.blitz} (${startRatings.blitz} -> ${endRatings.blitz})` : '';
-
-            const bulletRating = stats.bullet.count > 0 && startRatings.bullet != null && endRatings.bullet != null ? 
-                `, rating: ${endRatings.bullet - startRatings.bullet >= 0 ? '+' : ''}${endRatings.bullet - startRatings.bullet} (${startRatings.bullet} -> ${endRatings.bullet})` : '';
-
-            const periodName = periodType === 'yearly' ? 'this year' : periodType === 'monthly' ? 'this month' : periodType === 'weekly' ? 'this week' : 'today';
-
-            const msg = `${username} has played ${totalGamesStr} ${periodName}. ${rapidStr}${rapidRating}, ${blitzStr}${blitzRating}, ${bulletStr}${bulletRating}`;
-
-            await client.say(channel, msg);
-
-        } catch (err) {
-            console.error(`Error fetching stats for ${username}:`, err);
-            client.say(channel, `Error fetching stats for ${username}`);
-        }
-    }
-
-    if (command === '!recent') {
-        try {
-            const lastGame = await getLastGame(username);
-            if (!lastGame) {
-                await client.say(channel, `No recent games found for ${username}.`);
-                return;
-            }
-            const msg = `${username} has played as ${lastGame.color} and ${lastGame.result} most recent game:\n${lastGame.pgn}`;
-            await client.say(channel, msg);
-        } catch (err) {
-            console.error(`Error fetching last game for ${username}:`, err);
-            await client.say(channel, `Error fetching last game for ${username}.`);
-        }
-    }
-});
